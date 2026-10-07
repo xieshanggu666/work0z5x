@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>家庭能源与电费优化系统</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <script src="/static/vendor/vue.global.js"></script>
+</head>
+<body>
+  <div id="app" v-cloak>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">☀</div>
+        <div>
+          <h1>家庭能源中枢</h1>
+          <p>家庭能源与电费优化系统</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button class="btn primary" @click="runDay" :disabled="busy">{{ busy ? '计算中…' : '⚡ 模拟当日' }}</button>
+        <button class="btn" @click="runMonth" :disabled="busy">📅 月度账单</button>
+      </div>
+    </header>
+
+    <div class="panel-row">
+      <section class="panel">
+        <h3>场景参数</h3>
+        <label>月份 <input type="range" min="1" max="12" step="1" v-model.number="sc.month"> {{ sc.month }} 月</label>
+        <label>天气
+          <select v-model.number="sc.weather">
+            <option :value="1">晴</option>
+            <option :value="0.65">多云</option>
+            <option :value="0.35">阴</option>
+            <option :value="0.12">雨</option>
+          </select>
+        </label>
+        <label>光伏装机(kW) <input type="number" v-model.number="sc.capacity" step="0.5"></label>
+        <label>上网电价(元) <input type="number" v-model.number="sc.feed" step="0.05"></label>
+      </section>
+
+      <section class="panel">
+        <h3>储能电池</h3>
+        <label class="check"><input type="checkbox" v-model="sc.battery.enabled"> 启用储能优化</label>
+        <label>容量(kWh) <input type="number" v-model.number="sc.battery.capKwh" step="1" :disabled="!sc.battery.enabled"></label>
+        <label>功率(kW) <input type="number" v-model.number="sc.battery.maxKw" step="0.5" :disabled="!sc.battery.enabled"></label>
+        <label>效率 <input type="range" min="0.8" max="0.98" step="0.01" v-model.number="sc.battery.eff" :disabled="!sc.battery.enabled"> {{ (sc.battery.eff*100).toFixed(0) }}%</label>
+        <label>初始SOC <input type="range" min="0" max="1" step="0.05" v-model.number="sc.battery.soc0" :disabled="!sc.battery.enabled"> {{ (sc.battery.soc0*100).toFixed(0) }}%</label>
+      </section>
+
+      <section class="panel">
+        <h3>可迁移负荷</h3>
+        <label class="check" v-for="s in shiftables" :key="s.id">
+          <input type="checkbox" :value="s.id" v-model="sc.shiftableIds"> {{ s.name }}（{{ s.power }}kW × {{ s.hours }}h）
+        </label>
+        <p class="plan-note" v-if="plan.length">调度结果：<span v-for="p in plan" :key="p.id" class="plan-chip">{{ p.name }} → {{ p.start }}:00</span></p>
+      </section>
+    </div>
+
+    <div class="cost-row" v-if="result">
+      <div class="cost-card"><div class="cost-v">{{ result.cost_no_bat.toFixed(1) }} 元</div><div class="cost-k">无储能当日电费</div></div>
+      <div class="cost-card" v-if="result.cost_bat != null"><div class="cost-v up">{{ result.cost_bat.toFixed(1) }} 元</div><div class="cost-k">含储能当日电费</div></div>
+      <div class="cost-card" v-if="result.save"><div class="cost-v up">−{{ result.save.toFixed(1) }} 元</div><div class="cost-k">当日节省</div></div>
+      <div class="cost-card"><div class="cost-v">{{ result.kwh_export.toFixed(1) }} kWh</div><div class="cost-k">光伏上网</div></div>
+      <template v-if="month">
+        <div class="cost-card"><div class="cost-v">{{ month.cost_no_bat.toFixed(1) }} 元</div><div class="cost-k">无储能整月电费</div></div>
+        <div class="cost-card" v-if="month.cost_bat != null"><div class="cost-v up">{{ month.cost_bat.toFixed(1) }} 元</div><div class="cost-k">含储能整月电费</div></div>
+        <div class="cost-card" v-if="month.cost_bat != null"><div class="cost-v" :class="{ up: month.save >= 0 }">{{ month.save >= 0 ? '−' : '+' }}{{ Math.abs(month.save).toFixed(1) }} 元</div><div class="cost-k">整月节省（含阶梯）</div></div>
+        <div class="cost-card"><div class="cost-v">{{ month.tier_surcharge_no_bat.toFixed(1) }} 元</div><div class="cost-k">整月阶梯附加{{ month.cost_bat != null ? '（无/含：' + month.tier_surcharge_bat.toFixed(1) + '）' : '' }}</div></div>
+      </template>
+    </div>
+
+    <div class="chart-grid">
+      <section class="panel chart-panel">
+        <h3>24 小时功率曲线</h3>
+        <canvas ref="powerChart" class="chart-canvas"></canvas>
+      </section>
+      <section class="panel chart-panel" v-if="result && result.cost_bat != null">
+        <h3>电池 SOC 与充放电</h3>
+        <canvas ref="batChart" class="chart-canvas"></canvas>
+      </section>
+      <section class="panel chart-panel">
+        <h3>电价时间轴（元/kWh）</h3>
+        <canvas ref="priceChart" class="chart-canvas" style="height:180px"></canvas>
+      </section>
+      <section class="panel chart-panel" v-if="month">
+        <h3>月度每日能量电费 · {{ month.days }} 天（阶梯整月另计 {{ month.tier_surcharge_no_bat.toFixed(1) }} 元）</h3>
+        <canvas ref="monthChart" class="chart-canvas"></canvas>
+      </section>
+    </div>
+  </div>
+  <script src="/static/js/api.js"></script>
+  <script src="/static/js/charts.js"></script>
+  <script src="/static/js/main.js"></script>
+</body>
+</html>

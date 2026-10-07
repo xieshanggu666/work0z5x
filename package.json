@@ -1,0 +1,10 @@
+{
+  "name": "home-energy",
+  "version": "1.0.0",
+  "description": "家庭能源与电费优化系统",
+  "scripts": {
+    "dev": "node start.js",
+    "test": "node tests/run_tests.js"
+  },
+  "license": "MIT"
+}
