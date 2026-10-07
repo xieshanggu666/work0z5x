@@ -5,6 +5,7 @@ const solar = require("../engine/solar");
 const loads = require("../engine/loads");
 const battery = require("../engine/battery");
 const sim = require("../engine/sim");
+const dr = require("../engine/dr");
 
 let passed = 0;
 let failed = 0;
@@ -261,6 +262,239 @@ t("月度账单确定性", () => {
   const a = sim.monthBill({ month: 7, days: 20, seed: 3 });
   const b = sim.monthBill({ month: 7, days: 20, seed: 3 });
   assert.strictEqual(a.cost_no_bat, b.cost_no_bat);
+});
+
+// ============================= 需求响应 =============================
+
+const DR_HOUSEHOLD = {
+  capacity: 5, feed: 0.4,
+  shiftableIds: ["dish", "washer", "heater", "ev"],
+  battery: { capKwh: 8, maxKw: 3, eff: 0.9, soc0: 0.5 },
+};
+
+t("DR 信号价：削峰加价、填谷压价，非窗口时段不变", () => {
+  const prices = tariff.hourlyPrices();
+  const peak = dr.signalPrices(prices, dr.normalizeEvent({ type: "peak", start: 18, end: 21, incentive: 0.8 }));
+  assert.strictEqual(peak[18], 1.02 + 0.8);
+  assert.strictEqual(peak[21], prices[21]); // 左闭右开
+  assert.strictEqual(peak[0], prices[0]);
+  const fill = dr.signalPrices(prices, dr.normalizeEvent({ type: "fill", start: 0, end: 6, incentive: 0.3 }));
+  assert.strictEqual(fill[0], 0.32 - 0.3);
+  assert.strictEqual(fill[6], prices[6]);
+});
+
+t("DR 事件参数校验：空窗口/非正激励/非法时刻拒绝", () => {
+  assert.throws(() => dr.normalizeEvent({ type: "peak", start: 10, end: 10, incentive: 1 }));
+  assert.throws(() => dr.normalizeEvent({ type: "peak", start: 10, end: 12, incentive: 0 }));
+  assert.throws(() => dr.normalizeEvent({ type: "peak", start: 24, end: 25, incentive: 1 }));
+});
+
+t("DR 测算：同配置基线/响应只差信号；填谷让电池多充谷电", () => {
+  const ev = dr.normalizeEvent({ type: "fill", start: 0, end: 6, incentive: 0.4 });
+  const m = dr.measure({ ...DR_HOUSEHOLD, month: 7, day: 15 }, ev, 0.5, 0.32);
+  assert(m.bat.responded_kwh > 0);
+  assert(m.bat.reward === Math.round(m.bat.responded_kwh * 0.4 * 100) / 100);
+  // 响应窗口购电量高于基线（填谷方向）
+  assert(m.bat.response_grid_kwh > m.bat.baseline_grid_kwh);
+});
+
+t("DR 测算：削峰信号可把家电赶出窗口，按窗口减用结算", () => {
+  const hh = { month: 7, day: 15, weather: 0.12, capacity: 0, feed: 0.4, shiftableIds: ["dish", "washer"] };
+  const ev = dr.normalizeEvent({ type: "peak", start: 11, end: 14, incentive: 1.5 });
+  const m = dr.measure(hh, ev, null, 0.32);
+  assert(m.no_bat.responded_kwh > 0);
+  assert(m.response.plan.every(p => p.start < 11 || p.start + p.hours <= 11 || p.start >= 14));
+});
+
+t("DR 测算：含电池基线必须与同日无信号含电池比（不混入无电池曲线）", () => {
+  const ev = dr.normalizeEvent({ type: "peak", start: 18, end: 22, incentive: 1.0 });
+  const m = dr.measure({ ...DR_HOUSEHOLD, month: 7, day: 15, weather: 0.12 }, ev, 0.5, 0.32);
+  // 基线窗口电量取 grid_bat，不是无电池的 grid_no_bat
+  const win = ev.hours;
+  const baseWin = win.reduce((a, h) => a + m.baseline.hours[h].grid_bat, 0);
+  assert(Math.abs(baseWin - m.bat.baseline_grid_kwh) < 0.02);
+});
+
+t("DR 计划：发布/重复ID拒绝/撤销后报名失效", () => {
+  const s = dr.createStore();
+  s.publishPlan({ id: "p1", name: "T", month: 7, days: [15], events: [{ type: "peak", start: 18, end: 21, incentive: 1 }] });
+  assert.throws(() => s.publishPlan({ id: "p1", name: "T2", month: 7, days: [16], events: [{ type: "peak", start: 18, end: 21, incentive: 1 }] }));
+  s.enroll("h", "p1");
+  assert.strictEqual(s.isEnrolled("h", "p1"), true);
+  s.revokePlan("p1");
+  assert.strictEqual(s.isEnrolled("h", "p1"), false);
+  assert.throws(() => s.enroll("h2", "p1"));
+});
+
+t("DR 计划：days 与事件数量必须一致", () => {
+  const s = dr.createStore();
+  assert.throws(() => s.publishPlan({ name: "T", month: 7, days: [15, 16], events: [{ type: "peak", start: 18, end: 21, incentive: 1 }] }));
+});
+
+t("DR 执行：未报名拒绝；成功结果冻结且重复执行幂等", () => {
+  const s = dr.createStore();
+  s.publishPlan({ id: "p", name: "T", month: 7, days: [15], events: [{ type: "fill", start: 0, end: 6, incentive: 0.4 }] });
+  assert.throws(() => dr.runEvent("h", { planId: "p", day: 15, household: DR_HOUSEHOLD }, s));
+  s.enroll("h", "p");
+  const a = dr.runEvent("h", { planId: "p", day: 15, household: DR_HOUSEHOLD }, s);
+  const b = dr.runEvent("h", { planId: "p", day: 15, household: { ...DR_HOUSEHOLD, battery: { ...DR_HOUSEHOLD.battery, soc0: 0 } } }, s);
+  assert.strictEqual(b.idempotent, true);
+  assert.strictEqual(b.reward, a.reward);
+  assert.strictEqual(b.responded_kwh, a.responded_kwh);
+});
+
+t("DR 执行：量测失败冻结为 failed，奖励 0，后续不补结成功", () => {
+  const s = dr.createStore();
+  s.publishPlan({ id: "p", name: "T", month: 7, days: [15], events: [{ type: "fill", start: 0, end: 6, incentive: 0.4 }] });
+  s.enroll("h", "p");
+  const f = dr.runEvent("h", { planId: "p", day: 15, household: DR_HOUSEHOLD, telemetryFault: true }, s);
+  assert.strictEqual(f.status, "failed");
+  assert.strictEqual(f.reward, 0);
+  const f2 = dr.runEvent("h", { planId: "p", day: 15, household: DR_HOUSEHOLD }, s);
+  assert.strictEqual(f2.status, "failed");
+  assert.strictEqual(f2.idempotent, true);
+});
+
+t("DR 月度回写：奖励单列扣减，账单恒等式成立且只结一次", () => {
+  const s = dr.createStore();
+  s.publishPlan({ id: "p", name: "T", month: 7, days: [15], events: [{ type: "fill", start: 0, end: 6, incentive: 0.4 }] });
+  s.enroll("h", "p");
+  const ex = dr.runEvent("h", { planId: "p", day: 15, household: DR_HOUSEHOLD }, s);
+  assert(ex.reward > 0);
+  const m = sim.monthBill({ ...DR_HOUSEHOLD, month: 7, days: 30, homeId: "h", drStore: s });
+  assert.strictEqual(m.dr.settled_count, 1);
+  assert.strictEqual(m.dr.events[0].status, "settled");
+  assert.strictEqual(m.dr.events[0].reward, ex.reward);
+  // 实付 = 真实电费（原规则）− 激励；能量电费与阶梯口径不含激励
+  assert(Math.abs(m.cost_bat_after_dr - (m.cost_bat - m.dr_reward)) < 1e-9);
+  assert(Math.abs(m.energy_bat + m.tier_surcharge_bat - m.cost_bat) <= 0.011);
+  assert(m.dr_reward > 0);
+  // 重跑幂等
+  const m2 = sim.monthBill({ ...DR_HOUSEHOLD, month: 7, days: 30, homeId: "h", drStore: s });
+  assert.strictEqual(m2.dr_reward, m.dr_reward);
+  assert(m2.dr.events.every(e => e.idempotent));
+});
+
+t("DR 月度：事件日联动真实购电曲线，日明细含 DR 标记", () => {
+  const s = dr.createStore();
+  s.publishPlan({ id: "p", name: "T", month: 7, days: [15], events: [{ type: "fill", start: 0, end: 6, incentive: 0.4 }] });
+  s.enroll("h", "p");
+  const m = sim.monthBill({ ...DR_HOUSEHOLD, month: 7, days: 30, homeId: "h", drStore: s });
+  const d = m.daily.find(x => x.day === 15);
+  assert(Array.isArray(d.dr) && d.dr[0].status === "settled");
+  const other = sim.monthBill({ ...DR_HOUSEHOLD, month: 7, days: 30, seed: 11 });
+  const dOther = other.daily.find(x => x.day === 15);
+  // 填谷改变了当日真实购电量
+  assert(d.kwh_buy_bat !== dOther.kwh_buy_bat);
+});
+
+t("DR 撤销：未执行事件不联动不结算；已结算事件金额保留", () => {
+  const s = dr.createStore();
+  s.publishPlan({ id: "p", name: "T", month: 7, days: [15, 20], events: [
+    { type: "fill", start: 0, end: 6, incentive: 0.4 },
+    { type: "fill", start: 0, end: 6, incentive: 0.4 },
+  ]});
+  s.enroll("h", "p");
+  dr.runEvent("h", { planId: "p", day: 15, household: DR_HOUSEHOLD }, s);
+  s.revokePlan("p");
+  const m = sim.monthBill({ ...DR_HOUSEHOLD, month: 7, days: 30, homeId: "h", drStore: s });
+  const d15 = m.dr.events.find(e => e.day === 15);
+  const d20 = m.dr.events.find(e => e.day === 20);
+  assert.strictEqual(d15.status, "settled");
+  assert(d15.reward > 0);
+  assert.strictEqual(d20.status, "revoked");
+  assert.strictEqual(d20.reward, 0);
+  // d20 按原规则计算：与无 DR 账单一致
+  const plain = sim.monthBill({ ...DR_HOUSEHOLD, month: 7, days: 30, seed: 11 });
+  const p20 = plain.daily.find(x => x.day === 20);
+  const m20 = m.daily.find(x => x.day === 20);
+  assert.strictEqual(m20.energy_bat, p20.energy_bat);
+});
+
+t("DR 退出报名：事件不再联动，账单按原规则", () => {
+  const s = dr.createStore();
+  s.publishPlan({ id: "p", name: "T", month: 7, days: [15], events: [{ type: "fill", start: 0, end: 6, incentive: 0.4 }] });
+  s.enroll("h", "p");
+  s.unenroll("h", "p");
+  const m = sim.monthBill({ ...DR_HOUSEHOLD, month: 7, days: 30, homeId: "h", drStore: s });
+  assert.strictEqual(m.dr.events[0].status, "withdrawn");
+  assert.strictEqual(m.dr_reward, 0);
+  const plain = sim.monthBill({ ...DR_HOUSEHOLD, month: 7, days: 30, seed: 11 });
+  assert.strictEqual(m.cost_bat, plain.cost_bat);
+});
+
+t("DR 失败事件：账单按原规则计算且无奖励，且不与成功事件重复结算", () => {
+  const s = dr.createStore();
+  s.publishPlan({ id: "p", name: "T", month: 7, days: [15, 16], events: [
+    { type: "fill", start: 0, end: 6, incentive: 0.4 },
+    { type: "fill", start: 0, end: 6, incentive: 0.4 },
+  ]});
+  s.enroll("h", "p");
+  dr.runEvent("h", { planId: "p", day: 15, household: DR_HOUSEHOLD, telemetryFault: true }, s);
+  const m = sim.monthBill({ ...DR_HOUSEHOLD, month: 7, days: 30, homeId: "h", drStore: s });
+  assert.strictEqual(m.dr.failed_count, 1);
+  assert.strictEqual(m.dr.events.find(e => e.day === 15).reward, 0);
+  assert(m.dr.events.find(e => e.day === 16).reward > 0);
+  const reward = m.dr_reward;
+  const m2 = sim.monthBill({ ...DR_HOUSEHOLD, month: 7, days: 30, homeId: "h", drStore: s });
+  assert.strictEqual(m2.dr_reward, reward);
+});
+
+t("DR 不影响旧账单：无 homeId 时 dr 为空且各字段逐分不变", () => {
+  const a = sim.monthBill({ ...DR_HOUSEHOLD, month: 7, days: 30, seed: 11 });
+  const b = sim.monthBill({ ...DR_HOUSEHOLD, month: 7, days: 30, seed: 11 });
+  assert.strictEqual(a.dr, null);
+  assert.strictEqual(a.dr_reward, 0);
+  assert.strictEqual(a.cost_no_bat, b.cost_no_bat);
+  assert.strictEqual(a.cost_bat, b.cost_bat);
+});
+
+t("DR 电池：信号价寻优、真实价结算的分离不破坏成本口径", () => {
+  const prices = tariff.hourlyPrices();
+  const ev = dr.normalizeEvent({ type: "fill", start: 0, end: 6, incentive: 0.4 });
+  const sig = dr.signalPrices(prices, ev);
+  const hh = { month: 7, day: 15, ...DR_HOUSEHOLD };
+  const base = sim.computeDay(hh, 0.5, 0.32);
+  const resp = sim.computeDay({ ...hh, objPrices: sig }, 0.5, 0.32);
+  // 响应日逐时电费按真实价重算：energy_bat = Σ(真实价×购电−上网)（日终残值在 DP cost 内已补回）
+  let manual = 0;
+  for (const h of resp.hours) manual += h.grid_bat * prices[h.h] - 0.4 * h.export_bat;
+  assert(Math.abs(manual - resp.energy_bat) < 0.05);
+  assert(base.energy_bat !== resp.energy_bat || base.kwh_buy_bat !== resp.kwh_buy_bat);
+});
+
+t("DR 同日多计划：信号合并、逐事件归因结算", () => {
+  const s = dr.createStore();
+  s.publishPlan({ id: "pa", name: "A", month: 7, days: [15], events: [{ type: "fill", start: 0, end: 4, incentive: 0.4 }] });
+  s.publishPlan({ id: "pb", name: "B", month: 7, days: [15], events: [{ type: "fill", start: 4, end: 6, incentive: 0.6 }] });
+  s.enroll("h", "pa");
+  s.enroll("h", "pb");
+  const ea = dr.runEvent("h", { planId: "pa", day: 15, household: DR_HOUSEHOLD }, s);
+  const eb = dr.runEvent("h", { planId: "pb", day: 15, household: DR_HOUSEHOLD }, s);
+  const m = sim.monthBill({ ...DR_HOUSEHOLD, month: 7, days: 30, homeId: "h", drStore: s });
+  const evs = m.dr.events.filter(e => e.day === 15);
+  assert.strictEqual(evs.length, 2);
+  assert(evs.every(e => e.status === "settled"));
+  // 两笔事件分别结算（金额独立冻结），合计等于账单激励
+  const sum = Math.round((evs.reduce((a, e) => a + e.reward, 0)) * 100) / 100;
+  assert(Math.abs(sum - m.dr_reward) < 0.011);
+  // 独立执行冻结金额与账单回写一致
+  assert.strictEqual(evs.find(e => e.plan_id === "pa").reward, ea.reward);
+  assert.strictEqual(evs.find(e => e.plan_id === "pb").reward, eb.reward);
+});
+
+t("DR 削峰/填谷窗口重叠冲突时报错", () => {
+  const prices = tariff.hourlyPrices();
+  const a = dr.normalizeEvent({ type: "peak", start: 18, end: 21, incentive: 1 });
+  const b = dr.normalizeEvent({ type: "fill", start: 20, end: 23, incentive: 0.3 });
+  assert.throws(() => dr.mergeSignals(prices, [a, b]));
+});
+
+t("DR 计划：日期超出月份天数（含闰年）拒绝", () => {
+  const s = dr.createStore();
+  assert.throws(() => s.publishPlan({ name: "t", month: 2, days: [29], events: [{ type: "peak", start: 18, end: 21, incentive: 1 }] }));
+  s.publishPlan({ id: "leap", name: "t", year: 2024, month: 2, days: [29], events: [{ type: "peak", start: 18, end: 21, incentive: 1 }] });
+  assert.throws(() => s.publishPlan({ name: "t", month: 4, days: [31], events: [{ type: "peak", start: 18, end: 21, incentive: 1 }] }));
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

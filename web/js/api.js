@@ -21,4 +21,43 @@ const API = {
       body: JSON.stringify(params),
     });
   },
+
+  // ---------------------------- 需求响应 ----------------------------
+  drListPlans() { return this._req("/api/dr/plans"); },
+  drPublishPlan(body) {
+    return this._req("/api/dr/plans", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  drRevokePlan(planId) {
+    return this._req(`/api/dr/plans/${encodeURIComponent(planId)}/revoke`, { method: "POST" });
+  },
+  drEnroll(homeId, planId) {
+    return this._req("/api/dr/enroll", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ homeId, planId }),
+    });
+  },
+  drUnenroll(homeId, planId) {
+    return this._req("/api/dr/unenroll", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ homeId, planId }),
+    });
+  },
+  drHome(homeId, year, month) {
+    return this._req(`/api/dr/home/${encodeURIComponent(homeId)}?year=${year}&month=${month}`);
+  },
+  drExecute(body) {
+    return this._req("/api/dr/execute", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  drPreview(body) {
+    return this._req("/api/dr/preview", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
 };

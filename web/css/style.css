@@ -33,6 +33,21 @@ body { background: var(--bg); color: var(--txt); font-family: "PingFang SC", "Mi
 .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 0 22px 14px; }
 .chart-panel { min-width: 0; }
 .chart-canvas { width: 100%; height: 300px; display: block; background: #101a14; border-radius: 8px; border: 1px solid var(--line); }
+.btn.danger { color: #ff8b85; border-color: #5a2a28; }
+.btn.danger:hover { border-color: var(--peak); }
+.dr-plan { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 8px 0; }
+.dr-plan-h { display: flex; justify-content: space-between; align-items: center; font-size: 13px; margin-bottom: 2px; }
+.dr-tag { font-size: 10px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--line); }
+.dr-tag.ok { color: var(--accent); border-color: var(--accent); }
+.dr-tag.dead { color: var(--dim); }
+.dr-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.dr-actions .btn { padding: 5px 10px; font-size: 12px; flex: 1; }
+.dr-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+.dr-table th, .dr-table td { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: center; color: var(--dim); }
+.dr-table th { color: var(--sun); font-weight: 500; }
+.dr-table td.st-settled { color: var(--accent); }
+.dr-table td.st-failed, .dr-table td.st-revoked, .dr-table td.st-withdrawn { color: #ff8b85; }
+.dr-table td.st-enrolled { color: var(--dim); }
 @media (max-width: 1100px) {
   .panel-row { grid-template-columns: 1fr; }
   .cost-row { grid-template-columns: repeat(2, 1fr); }

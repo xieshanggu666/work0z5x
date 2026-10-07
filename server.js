@@ -6,6 +6,7 @@ const tariff = require("./engine/tariff");
 const solar = require("./engine/solar");
 const loads = require("./engine/loads");
 const sim = require("./engine/sim");
+const dr = require("./engine/dr");
 
 const arg = process.argv.find(a => a.startsWith("--port="));
 const PORT = arg ? parseInt(arg.slice(7), 10) : parseInt(process.env.PORT || "8074", 10);
@@ -49,6 +50,69 @@ const server = http.createServer(async (req, res) => {
         tou: tariff.DEFAULT_TOU,
       });
     }
+
+    // ------------------------- 电网需求响应 -------------------------
+    // 运营方发布峰谷激励计划
+    if (p === "/api/dr/plans" && req.method === "POST") {
+      const body = JSON.parse(await readBody(req));
+      return json(res, 200, dr.store.publishPlan(body || {}));
+    }
+    if (p === "/api/dr/plans" && req.method === "GET") {
+      return json(res, 200, { plans: dr.store.listPlans() });
+    }
+    // 撤销计划（GET 仅查询）
+    if (p.startsWith("/api/dr/plans/") && p.endsWith("/revoke") && req.method === "POST") {
+      const planId = decodeURIComponent(p.slice("/api/dr/plans/".length, -"/revoke".length));
+      return json(res, 200, dr.store.revokePlan(planId));
+    }
+    // 家庭报名 / 退出
+    if (p === "/api/dr/enroll" && req.method === "POST") {
+      const body = JSON.parse(await readBody(req)) || {};
+      if (!body.homeId || !body.planId) return json(res, 400, { error: "homeId 与 planId 必填" });
+      return json(res, 200, dr.store.enroll(body.homeId, body.planId));
+    }
+    if (p === "/api/dr/unenroll" && req.method === "POST") {
+      const body = JSON.parse(await readBody(req)) || {};
+      if (!body.homeId || !body.planId) return json(res, 400, { error: "homeId 与 planId 必填" });
+      return json(res, 200, dr.store.unenroll(body.homeId, body.planId));
+    }
+    // 家庭视角：报名情况与某月事件台账（含撤销/失败/已结算）
+    if (p.startsWith("/api/dr/home/") && req.method === "GET") {
+      const homeId = decodeURIComponent(p.slice("/api/dr/home/".length).split("?")[0]);
+      const year = Number(url.searchParams.get("year") || new Date().getFullYear());
+      const month = Number(url.searchParams.get("month") || 7);
+      return json(res, 200, {
+        homeId,
+        enrollments: dr.store.listEnrollments(homeId),
+        events: dr.store.monthlyEvents(homeId, year, month),
+      });
+    }
+    // 执行某次 DR 事件（量测、联动调度、冻结结算；重复调用幂等不重复结算）
+    if (p === "/api/dr/execute" && req.method === "POST") {
+      const body = JSON.parse(await readBody(req)) || {};
+      if (!body.homeId) return json(res, 400, { error: "homeId 必填" });
+      return json(res, 200, dr.runEvent(body.homeId, body));
+    }
+    // DR 事件日单日预览（不结算、不写台账）：基线 vs 响应对比
+    if (p === "/api/dr/preview" && req.method === "POST") {
+      const body = JSON.parse(await readBody(req)) || {};
+      const event = dr.normalizeEvent(body.event || {
+        type: body.type, start: body.start, end: body.end, incentive: body.incentive,
+      });
+      const household = body.household || {};
+      const carry = household.battery && household.battery.soc0 != null ? household.battery.soc0 : null;
+      const valley = Math.min.apply(null, tariff.hourlyPrices(household.tou));
+      const m = dr.measure(household, event, carry, valley);
+      return json(res, 200, {
+        event: { type: event.type, window: event.window, incentive: event.incentive, hours: event.hours },
+        signal: m.signal,
+        no_bat: m.no_bat,
+        bat: m.bat,
+        response_hours: m.response.hours,
+        plan: m.response.plan,
+      });
+    }
+
     if (p === "/api/simulate" && req.method === "POST") {
       const body = JSON.parse(await readBody(req));
       const r = sim.simulateDay(body || {});
@@ -66,6 +130,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     let f = p === "/" ? "/index.html" : p;
+    if (f.startsWith("/static/")) f = f.slice("/static".length); // 前端静态资源前缀
     const fp = path.normalize(path.join(WEB, f));
     if (!fp.startsWith(WEB)) return json(res, 403, { error: "forbidden" });
     if (fs.existsSync(fp) && fs.statSync(fp).isFile()) {

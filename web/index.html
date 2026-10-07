@@ -57,6 +57,68 @@
       </section>
     </div>
 
+    <div class="panel-row" style="grid-template-columns: 1.2fr 1fr 1.1fr;">
+      <section class="panel">
+        <h3>⚡ 电网需求响应 · 运营方发布</h3>
+        <label>计划名称 <input type="text" v-model="dr.form.name" placeholder="如：7月晚峰削峰"></label>
+        <label>月份 <input type="number" min="1" max="12" v-model.number="dr.form.month"></label>
+        <label>事件日期(逗号) <input type="text" v-model="dr.form.days" placeholder="15,20"></label>
+        <label>类型
+          <select v-model="dr.form.type">
+            <option value="peak">峰段削峰（窗口少用电）</option>
+            <option value="fill">谷段填谷（窗口多用电）</option>
+          </select>
+        </label>
+        <label>窗口(时) <input type="number" min="0" max="23" v-model.number="dr.form.start" style="width:50px"> -
+          <input type="number" min="1" max="24" v-model.number="dr.form.end" style="width:50px"></label>
+        <label>激励(元/kWh) <input type="number" step="0.1" v-model.number="dr.form.incentive"></label>
+        <button class="btn primary" style="width:100%;margin-top:6px" @click="publishPlan" :disabled="busy">发布计划（多日同窗口）</button>
+        <p class="plan-note">激励只叠加到调度信号价：削峰窗口加价驱离负荷，填谷窗口压价吸引充电；真实电费仍按分时电价结算。</p>
+      </section>
+
+      <section class="panel">
+        <h3>🏠 家庭报名</h3>
+        <label>家庭ID <input type="text" v-model="dr.homeId"></label>
+        <button class="btn" style="width:100%" @click="refreshHome" :disabled="busy">刷新我的报名 / 事件</button>
+        <div class="dr-plan" v-for="p in dr.plans" :key="p.id">
+          <div class="dr-plan-h">
+            <span>{{ p.name }}</span>
+            <span :class="'dr-tag ' + (p.status === 'published' ? 'ok' : 'dead')">{{ p.status === 'published' ? '生效中' : '已撤销' }}</span>
+          </div>
+          <div class="plan-note">{{ p.year }}-{{ String(p.month).padStart(2,'0') }} ·
+            <span v-for="(e,i) in p.events" :key="i">{{ e.day }}日 {{ e.type === 'peak' ? '削峰' : '填谷' }} {{ e.start }}-{{ e.end }}时 {{ e.incentive }}元；</span>
+          </div>
+          <div class="dr-actions">
+            <button class="btn primary" v-if="p.status === 'published'" @click="enroll(p.id)" :disabled="busy">报名</button>
+            <button class="btn" v-if="p.status === 'published'" @click="unenroll(p.id)" :disabled="busy">退出</button>
+            <button class="btn danger" @click="revoke(p.id)" :disabled="busy || p.status !== 'published'">运营方撤销</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>📋 当月事件执行与结算</h3>
+        <label>执行日期 <input type="number" min="1" max="31" v-model.number="dr.execDay" style="width:70px">
+          <label class="check" style="margin:0"><input type="checkbox" v-model="dr.fault"> 模拟量测失败</label>
+        </label>
+        <button class="btn primary" style="width:100%" @click="executeEvent" :disabled="busy">执行事件（幂等结算）</button>
+        <table class="dr-table" v-if="dr.home && dr.home.events.length">
+          <thead><tr><th>日</th><th>类型</th><th>状态</th><th>响应kWh</th><th>奖励(元)</th></tr></thead>
+          <tbody>
+            <tr v-for="e in dr.home.events" :key="e.eventKey">
+              <td>{{ e.day }}</td>
+              <td>{{ e.type === 'peak' ? '削峰' : '填谷' }}</td>
+              <td :class="'st-' + e.status">{{ stText(e.status) }}</td>
+              <td>{{ e.responded_kwh == null ? '—' : e.responded_kwh }}</td>
+              <td>{{ e.reward == null ? '—' : e.reward.toFixed(2) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="plan-note" v-else>当月暂无报名事件。</p>
+        <p class="plan-note">重复执行只回读首笔结算；失败不补结；撤销后未执行事件不再联动，已结算金额保留。</p>
+      </section>
+    </div>
+
     <div class="cost-row" v-if="result">
       <div class="cost-card"><div class="cost-v">{{ result.cost_no_bat.toFixed(1) }} 元</div><div class="cost-k">无储能当日电费</div></div>
       <div class="cost-card" v-if="result.cost_bat != null"><div class="cost-v up">{{ result.cost_bat.toFixed(1) }} 元</div><div class="cost-k">含储能当日电费</div></div>
@@ -67,6 +129,12 @@
         <div class="cost-card" v-if="month.cost_bat != null"><div class="cost-v up">{{ month.cost_bat.toFixed(1) }} 元</div><div class="cost-k">含储能整月电费</div></div>
         <div class="cost-card" v-if="month.cost_bat != null"><div class="cost-v" :class="{ up: month.save >= 0 }">{{ month.save >= 0 ? '−' : '+' }}{{ Math.abs(month.save).toFixed(1) }} 元</div><div class="cost-k">整月节省（含阶梯）</div></div>
         <div class="cost-card"><div class="cost-v">{{ month.tier_surcharge_no_bat.toFixed(1) }} 元</div><div class="cost-k">整月阶梯附加{{ month.cost_bat != null ? '（无/含：' + month.tier_surcharge_bat.toFixed(1) + '）' : '' }}</div></div>
+      </template>
+      <template v-if="month && month.dr">
+        <div class="cost-card"><div class="cost-v up">−{{ month.dr_reward.toFixed(2) }} 元</div><div class="cost-k">需求响应激励（{{ month.dr.settled_count }}笔成功 / {{ month.dr.failed_count }}失败 / {{ month.dr.revoked_count }}撤销）</div></div>
+        <div class="cost-card" v-if="month.cost_bat_after_dr != null"><div class="cost-v up">{{ month.cost_bat_after_dr.toFixed(1) }} 元</div><div class="cost-k">含储能实付（电费−激励）</div></div>
+        <div class="cost-card" v-else><div class="cost-v up">{{ month.cost_no_bat_after_dr.toFixed(1) }} 元</div><div class="cost-k">无储能实付（电费−激励）</div></div>
+        <div class="cost-card"><div class="cost-v up" v-if="month.dr_save_bat != null">−{{ month.dr_save_bat.toFixed(2) }} 元</div><div class="cost-k" v-else-if="month.dr_save_no_bat != null">−{{ month.dr_save_no_bat.toFixed(2) }} 元</div><div class="cost-k">DR 综合节省（联动+激励）</div></div>
       </template>
     </div>
 
