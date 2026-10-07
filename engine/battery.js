@@ -4,7 +4,12 @@ function r3(x) {
   return Math.round(x * 1000) / 1000;
 }
 
-function optimizeBattery({ load, solar, price, feed, capKwh, maxKw, eff, soc0, endValue }) {
+function optimizeBattery({ load, solar, price, feed, capKwh, maxKw, eff, soc0, endValue, priceEff }) {
+  // priceEff 为需求响应"调度信号价"（峰段加价/谷段减价）：只参与 DP 选路，
+  // 引导电池在事件时段放电/充电。返回的 energy_actual 是按真实分时价 price
+  // 在被选路径上重算的物理购售电支出，作为账单口径；cost 始终是 DP 目标值。
+  // priceEff 缺省时两者口径完全一致，保持原有行为。
+  const sig = priceEff || price;
   const H = 24;
   const n = 21;
   const step = capKwh / (n - 1);
@@ -41,7 +46,7 @@ function optimizeBattery({ load, solar, price, feed, capKwh, maxKw, eff, soc0, e
         const netLoad = Math.max(0, load[h] - dis * eff2);
         const gridIn = Math.max(0, netLoad + ch - solar[h]);
         const exp = Math.max(0, solar[h] - netLoad - ch);
-        const v = cur + price[h] * gridIn - feed * exp;
+        const v = cur + sig[h] * gridIn - feed * exp;
         if (v < ndp[j] - 1e-9) {
           ndp[j] = v;
           par[j] = i;
@@ -77,12 +82,15 @@ function optimizeBattery({ load, solar, price, feed, capKwh, maxKw, eff, soc0, e
   const hours = [];
   let kwhBuy = 0;
   let kwhExport = 0;
+  let energyActual = 0;
   for (let h = 0; h < H; h++) {
     const netLoad = Math.max(0, load[h] - dis[h] * eff2);
     const gridIn = Math.max(0, netLoad + ch[h] - solar[h]);
     const exp = Math.max(0, solar[h] - netLoad - ch[h]);
     kwhBuy += gridIn;
     kwhExport += exp;
+    // 物理账单口径：被选路径的逐时真实购售电支出（未舍入，供月度累计）
+    energyActual += price[h] * gridIn - feed * exp;
     hours.push({
       h,
       ch: r3(ch[h]),
@@ -94,7 +102,7 @@ function optimizeBattery({ load, solar, price, feed, capKwh, maxKw, eff, soc0, e
     });
   }
   const endSoc = socOf(j);
-  return { hours, cost: total, kwh_buy: r3(kwhBuy), kwh_export: r3(kwhExport), soc_start_kwh: r3(socOf(i0)), soc_end_kwh: r3(endSoc) };
+  return { hours, cost: total, energy_actual: energyActual, kwh_buy: r3(kwhBuy), kwh_export: r3(kwhExport), soc_start_kwh: r3(socOf(i0)), soc_end_kwh: r3(endSoc) };
 }
 
 module.exports = { optimizeBattery };

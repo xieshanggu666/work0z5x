@@ -32,7 +32,10 @@ function costAt(load, solar, price, feed) {
   return price * gridIn - feed * exp;
 }
 
-function scheduleShiftable(base, solar, price, feed, shiftables) {
+function scheduleShiftable(base, solar, price, feed, shiftables, priceEff) {
+  // priceEff 为需求响应时段的"调度信号价"（峰段加价/谷段减价），仅影响家电的
+  // 起始时隙选择；物理账单仍按真实分时价 price 结算。缺省即等价于 price。
+  const sig = priceEff || price;
   const load = base.slice();
   const plan = [];
   for (const s of shiftables) {
@@ -43,8 +46,8 @@ function scheduleShiftable(base, solar, price, feed, shiftables) {
       let delta = 0;
       for (let k = 0; k < s.hours; k++) {
         const h = (st + k) % 24;
-        const before = costAt(load[h], solar[h], price[h], feed);
-        const after = costAt(load[h] + s.power, solar[h], price[h], feed);
+        const before = costAt(load[h], solar[h], sig[h], feed);
+        const after = costAt(load[h] + s.power, solar[h], sig[h], feed);
         delta += after - before;
       }
       if (delta < bestCost - 1e-12) {

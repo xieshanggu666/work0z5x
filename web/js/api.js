@@ -21,4 +21,38 @@ const API = {
       body: JSON.stringify(params),
     });
   },
+  drPlans() { return this._req("/api/dr/plans"); },
+  drPublish(plan) {
+    return this._req("/api/dr/plans", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(plan),
+    });
+  },
+  drEnroll(planId, body) {
+    return this._req(`/api/dr/plans/${encodeURIComponent(planId)}/enroll`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    });
+  },
+  drCancelEnroll(planId, homeId) {
+    return this._req(`/api/dr/plans/${encodeURIComponent(planId)}/enroll/cancel`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ homeId }),
+    });
+  },
+  drSettle(planId, homeId) {
+    return this._req(`/api/dr/plans/${encodeURIComponent(planId)}/settle`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ homeId }),
+    });
+  },
+  drBill(planId, homeId) {
+    return this._req(`/api/dr/plans/${encodeURIComponent(planId)}/bill?homeId=${encodeURIComponent(homeId)}`);
+  },
+  drPreview(body) {
+    return this._req("/api/dr/preview", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
 };

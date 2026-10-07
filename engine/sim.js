@@ -33,8 +33,27 @@ function computeDay(opts, batterySocStartKwh, endValue) {
   const ids = o.shiftableIds && o.shiftableIds.length
     ? o.shiftableIds
     : loadsMod.SHIFTABLE.map(s => s.id);
-  const shiftables = loadsMod.SHIFTABLE.filter(s => ids.includes(s.id));
-  const { load, plan } = loadsMod.scheduleShiftable(base, solar, prices, feed, shiftables);
+  // 需求响应上下文：priceEff 为事件时段的调度信号价（峰加/谷减）；
+  // enrolledIds 为本次报名联动的可迁移家电，其余家电按原分时价调度。
+  // 信号价只决定起始时隙，购售电账单仍以真实分时价 prices 结算。
+  const drCtx = o.dr || null;
+  const drActive = !!(drCtx && drCtx.priceEff);
+  const enrolledIds = drActive
+    ? ids.filter(id => !(drCtx.enrolledIds && drCtx.enrolledIds.length) || drCtx.enrolledIds.includes(id))
+    : [];
+  const notEnrolledIds = drActive ? ids.filter(id => !enrolledIds.includes(id)) : ids;
+  const allShiftables = loadsMod.SHIFTABLE.filter(s => ids.includes(s.id));
+
+  const load0 = base.slice();
+  // 先按真实价调度未报名家电，再让报名家电在含前序负荷的曲面上按信号价贪心选位
+  const pass1 = notEnrolledIds.length
+    ? loadsMod.scheduleShiftable(load0, solar, prices, feed, allShiftables.filter(s => notEnrolledIds.includes(s.id)))
+    : { load: load0, plan: [] };
+  const pass2 = enrolledIds.length
+    ? loadsMod.scheduleShiftable(pass1.load, solar, prices, feed, allShiftables.filter(s => enrolledIds.includes(s.id)), drCtx.priceEff)
+    : { load: pass1.load, plan: [] };
+  const load = pass2.load;
+  const plan = pass1.plan.concat(pass2.plan).map(p => ({ ...p, dr: drActive && enrolledIds.includes(p.id) }));
 
   const noBat = battery.optimizeBattery({
     load, solar, price: prices, feed,
@@ -49,6 +68,8 @@ function computeDay(opts, batterySocStartKwh, endValue) {
         : (batCfg.soc0 == null ? 0.5 : batCfg.soc0))
     : null;
   const endV = endValue || 0;
+  // 电池是否联动需求响应：缺省联动；报名时可显式 battery:false 只让家电响应
+  const batPriceEff = drActive && drCtx.battery !== false ? drCtx.priceEff : null;
   const bat = hasBat
     ? battery.optimizeBattery({
         load, solar, price: prices, feed,
@@ -57,6 +78,7 @@ function computeDay(opts, batterySocStartKwh, endValue) {
         eff: batCfg.eff == null ? 0.9 : batCfg.eff,
         soc0: socStartKwh,
         endValue: endV,
+        priceEff: batPriceEff,
       })
     : null;
 
@@ -84,9 +106,11 @@ function computeDay(opts, batterySocStartKwh, endValue) {
   return {
     hours,
     plan,
-    // 当日电网实际收支（购电费 − 上网收益）：日明细、单日账单、月度累计的统一口径
+    // 当日电网实际收支（购电费 − 上网收益）：日明细、单日账单、月度累计的统一口径。
+    // 含储能时取被选路径在真实分时价上的物理支出（+日终残值回补）；
+    // DR 信号价只用于 DP 选路，绝不直接进入账单口径。
     energy_no_bat: noBat.cost,
-    energy_bat: bat ? bat.cost + endV * bat.soc_end_kwh : null,
+    energy_bat: bat ? bat.energy_actual + endV * bat.soc_end_kwh : null,
     // DP 目标值与残值：仅用于月度电池资产清算（望远镜求和），不参与日明细
     dp_cost_bat: bat ? bat.cost : null,
     residual_per_kwh: endV,

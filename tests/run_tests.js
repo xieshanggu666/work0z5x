@@ -264,4 +264,8 @@ t("月度账单确定性", () => {
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
-process.exit(failed ? 1 : 0);
+if (failed) process.exit(1);
+
+// 需求响应计划套件（独立文件，自带断言与计数）
+require("child_process").execFileSync(process.execPath, [require("path").join(__dirname, "dr_tests.js")], { stdio: "inherit" });
+

@@ -53,8 +53,47 @@
         <label class="check" v-for="s in shiftables" :key="s.id">
           <input type="checkbox" :value="s.id" v-model="sc.shiftableIds"> {{ s.name }}（{{ s.power }}kW × {{ s.hours }}h）
         </label>
-        <p class="plan-note" v-if="plan.length">调度结果：<span v-for="p in plan" :key="p.id" class="plan-chip">{{ p.name }} → {{ p.start }}:00</span></p>
+        <p class="plan-note" v-if="plan.length">调度结果：<span v-for="p in plan" :key="p.id" class="plan-chip" :class="{ dr: p.dr }">{{ p.name }} → {{ p.start }}:00{{ p.dr ? ' ⚡' : '' }}</span></p>
       </section>
+    </div>
+
+    <div class="dr-bar panel">
+      <div class="dr-head">
+        <h3>⚡ 电网需求响应计划</h3>
+        <div class="dr-actions">
+          <label class="dr-home">家庭 <input type="text" v-model="drHome" size="8"></label>
+          <select v-model="drPlanId">
+            <option v-for="p in drPlans" :key="p.id" :value="p.id">
+              {{ p.name }}（{{ p.status === 'active' ? '进行中' : '已撤销' }}）
+            </option>
+          </select>
+          <button class="btn" @click="drEnroll" :disabled="!drPlanId">报名联动</button>
+          <button class="btn" @click="drCancel" :disabled="!drPlanId">撤销报名</button>
+          <button class="btn primary" @click="drSettle" :disabled="!drPlanId || drBusy">{{ drBusy ? '结算中…' : '执行结算' }}</button>
+          <button class="btn" @click="loadPlans">刷新</button>
+        </div>
+      </div>
+      <div class="dr-events" v-if="drPlan">
+        <span v-for="(e, i) in drPlan.events" :key="i" class="dr-ev" :class="e.kind">
+          {{ e.kind === 'peak_shave' ? '削峰' : '填谷' }} {{ e.start }}-{{ e.end }} 点 · 激励 {{ e.incentive }} 元/kWh<template v-if="e.requiredKwh"> · 门槛 {{ e.requiredKwh }}kWh</template>
+        </span>
+        <span class="dr-days">生效日：第 {{ drPlan.startDay }} 天起{{ drPlan.endDay ? '至第 ' + drPlan.endDay + ' 天' : '' }}</span>
+      </div>
+      <div class="dr-msg" v-if="drMsg" :class="drMsgKind">{{ drMsg }}</div>
+      <div class="dr-result" v-if="drBill">
+        <div class="cost-row" style="padding:0">
+          <div class="cost-card"><div class="cost-v" :class="billStatusClass">{{ billStatusText }}</div><div class="cost-k">结算状态</div></div>
+          <div class="cost-card"><div class="cost-v up">−{{ (drBill.reward || 0).toFixed(1) }} 元</div><div class="cost-k">峰谷激励奖励</div></div>
+          <div class="cost-card" v-if="drFull"><div class="cost-v">{{ drFull.cost_bat != null ? drFull.cost_bat.toFixed(1) : drFull.cost_no_bat.toFixed(1) }} 元</div><div class="cost-k">原规则月度账单</div></div>
+          <div class="cost-card" v-if="drFull"><div class="cost-v up">{{ (drFull.dr.final_bat != null ? drFull.dr.final_bat : drFull.dr.final_no_bat).toFixed(1) }} 元</div><div class="cost-k">联动后实付（账单−奖励）</div></div>
+          <div class="cost-card" v-if="drFull"><div class="cost-v up">−{{ Math.abs(drFull.dr.save).toFixed(1) }} 元</div><div class="cost-k">需求响应总节省</div></div>
+          <div class="cost-card"><div class="cost-v">{{ drBill.delivered_events }} / {{ (drBill.delivered_events||0) + (drBill.failed_events||0) }}</div><div class="cost-k">达标事件 / 总事件</div></div>
+        </div>
+        <p class="plan-note" v-if="drFull">
+          联动家电：{{ drFull.dr.enrollment.shiftable_ids.join('、') || '—' }}；电池调度：{{ drFull.dr.enrollment.battery_linked ? '已联动' : '未联动' }}。
+          奖励仅冲减一次；重复结算返回同一结算单（{{ drBill.id }}）。
+        </p>
+      </div>
     </div>
 
     <div class="cost-row" v-if="result">
@@ -86,6 +125,10 @@
       <section class="panel chart-panel" v-if="month">
         <h3>月度每日能量电费 · {{ month.days }} 天（阶梯整月另计 {{ month.tier_surcharge_no_bat.toFixed(1) }} 元）</h3>
         <canvas ref="monthChart" class="chart-canvas"></canvas>
+      </section>
+      <section class="panel chart-panel" v-if="drFull">
+        <h3>需求响应：每日原账单 / 联动后实付 / 激励奖励</h3>
+        <canvas ref="drChart" class="chart-canvas"></canvas>
       </section>
     </div>
   </div>
